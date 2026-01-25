@@ -8,6 +8,7 @@
 ====================================
 
 """
+import copy  # Added for safe config copying
 import os
 from functools import cached_property
 from itertools import cycle
@@ -71,7 +72,12 @@ class FtrEnvCfg(DirectRLEnvCfg):
     terrain_name = "cur_steps_down"
 
     # robot
-    robot: ArticulationCfg = FTR_CFG
+    # Apply scaling to the robot model.
+    # Original model dimensions need to be known to calculate exact scale factor.
+    # Example: If original width is 0.5m and target is 0.8m, scale Y (or corresponding axis) by 1.6.
+    robot: ArticulationCfg = copy.deepcopy(FTR_CFG)
+    robot.spawn.scale = (1.0, 1.0, 1.0) #  TODO: Adjust these values! (Length scale, Width scale, Height scale)
+    
     forward_vel_range = (0.2, 0.3)
     initial_flipper_range = (0, 0)
     robot_config = {
@@ -82,25 +88,25 @@ class FtrEnvCfg(DirectRLEnvCfg):
 
         "chassis_wheel_render_mass": 3,
         "flipper_wheel_render_mass": 1,
-        "flipper_pos_max": 60,
+        "flipper_pos_max": 90,
     }
     robot_render_config = {
         "flipper": {
             "only_render_front_flipper": False,
-            "drive_wheel_radius": 0.09,
+            "drive_wheel_radius": 0.16,
             "auxiliary_wheel_radius": 0.09,
         },
         "track": {
-            "render_radius": 0.1,
+            "render_radius": 0.16,
         }
     }
     noise = {
-        "hmap_noise_std": 0.1,
-        "flipper_drive_noise_std": 0.01,
-        "baselink_drive_noise_std": 0.01,
-        "flipper_pos_noise_std": 0.01,
-        "angular_vel_noise_std": 0.2,
-        "orientation_noise_std": 0.01,
+        "hmap_noise_std": 0.0,
+        "flipper_drive_noise_std": 0.00,
+        "baselink_drive_noise_std": 0.00,
+        "flipper_pos_noise_std": 0.00,
+        "angular_vel_noise_std": 0.00,
+        "orientation_noise_std": 0.00,
     }
 
 
@@ -125,6 +131,9 @@ class FtrEnv(DirectRLEnv):
         super().__init__(cfg, render_mode, **kwargs)
         self.world = World.instance()
 
+        # Flag to suppress automatic resets - used during data collection phases
+        self.suppress_done_signals = False
+
         self.hmap_noise_std = self.cfg.noise["hmap_noise_std"]
         self.flipper_drive_noise_std = self.cfg.noise["flipper_drive_noise_std"]
         self.baselink_drive_noise_std = self.cfg.noise["baselink_drive_noise_std"]
@@ -138,8 +147,8 @@ class FtrEnv(DirectRLEnv):
 
         self.forward_range = self.cfg.forward_vel_range
         self.initial_flipper_range = self.cfg.initial_flipper_range
-        self.forward_vel_commands = torch.zeros(self.num_envs, 1)
-        self.flipper_target_pos = torch.zeros(self.num_envs, self.flipper_num)
+        self.forward_vel_commands = torch.zeros(self.num_envs, 1, device=self.device)
+        self.flipper_target_pos = torch.zeros(self.num_envs, self.flipper_num, device=self.device)
         self._prepare_reset_info()
 
         self.start_positions = torch.zeros((self.num_envs, 3), device=self.device)
@@ -160,7 +169,7 @@ class FtrEnv(DirectRLEnv):
 
     def _apply_action(self):
         real_forward_vel_cmd = add_noise(torch.cat(
-            [self.forward_vel_commands, torch.zeros(self.num_envs, 1)], dim=-1
+            [self.forward_vel_commands, torch.zeros(self.num_envs, 1, device=self.device)], dim=-1
         ), std=self.baselink_drive_noise_std)
         real_flipper_cmd = add_noise(
             self._calc_comp_flipper_pos(self.flipper_target_pos),
@@ -192,21 +201,24 @@ class FtrEnv(DirectRLEnv):
 
     def _reset_idx(self, env_ids: Sequence[int]):
         super()._reset_idx(env_ids)
-        self._robot.write_root_state_to_sim(torch.zeros(len(env_ids), 13), env_ids=env_ids)
+        self._robot.write_root_state_to_sim(torch.zeros(len(env_ids), 13, device=self.device), env_ids=env_ids)
 
         reset_infos = [self._reset_info_generate() for _ in range(len(env_ids))]
-        self._robot.write_root_pose_to_sim(torch.stack([i["pose"] for i in reset_infos]), env_ids=env_ids)
+        self._robot.write_root_pose_to_sim(torch.stack([i["pose"] for i in reset_infos]).to(self.device), env_ids=env_ids)
         self.flipper_positions[env_ids, :] = torch.deg2rad(rand_range(
             self.initial_flipper_range,
             (len(env_ids), self.flipper_num),
             device=self.device
         ))
         self._robot.set_all_flipper_positions(self._calc_comp_flipper_pos(self.flipper_positions))
-        self.forward_vel_commands[env_ids] = rand_range(self.forward_range, (len(env_ids), 1), device=self.device)
+        # **FIX**: Set forward_vel_commands to 0 instead of random values
+        # This ensures new robots spawn with zero velocity when they're reset
+        # Random velocity will be applied by the trainer/policy during actual training
+        self.forward_vel_commands[env_ids] = 0.0
 
-        self.start_positions[env_ids] = torch.stack([i["start_point"] for i in reset_infos])
-        self.orientations[env_ids] = torch.stack([i["start_orient"] for i in reset_infos])
-        self.target_positions[env_ids] = torch.stack([i["target_point"] for i in reset_infos])
+        self.start_positions[env_ids] = torch.stack([i["start_point"] for i in reset_infos]).to(self.device)
+        self.orientations[env_ids] = torch.stack([i["start_orient"] for i in reset_infos]).to(self.device)
+        self.target_positions[env_ids] = torch.stack([i["target_point"] for i in reset_infos]).to(self.device)
 
         # clear history data
         for i in env_ids:
@@ -262,7 +274,7 @@ class FtrEnv(DirectRLEnv):
         self._post_physics_step()
         self.reset_terminated = torch.zeros_like(self.reset_terminated)
         self.reset_time_outs = torch.zeros_like(self.reset_time_outs)
-        self.reward_buf = torch.zeros(self.num_envs)
+        self.reward_buf = torch.zeros(self.num_envs, device=self.device)
 
         # subclass imp
         ...

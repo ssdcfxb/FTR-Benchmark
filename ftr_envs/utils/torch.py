@@ -13,7 +13,7 @@ import torch
 
 def add_noise(data, std):
     size = data.size()
-    noise = torch.normal(0, std=std, size=size)
+    noise = torch.normal(0, std=std, size=size, device=data.device)
     return data + noise
 
 

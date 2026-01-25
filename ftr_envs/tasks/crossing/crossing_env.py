@@ -115,9 +115,13 @@ class CrossingEnv(FtrEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         # shutdown reward
+        # Ensure we construct the tensor on the correct device
+        shutdown_metrics = [self._calculate_metrics_shutdown(i) for i in range(self.num_envs)]
         self.reward_buf += 0.2 * torch.tensor(
-            [self._calculate_metrics_shutdown(i) for i in range(self.num_envs)]
-        ).float()
+            shutdown_metrics,
+            device=self.device,
+            dtype=torch.float32
+        )
         # robot height reward
         self.reward_buf += -2 * torch.relu(
             self.positions[:, 2]
@@ -132,13 +136,20 @@ class CrossingEnv(FtrEnv):
                 ((self.orientations_3[:, 0].abs() > 0) * self.orientations_3[:, 0]) ** 2
         )
         # ang reward
-        self.reward_buf -= (torch.tensor([0.1, 0.2, 0.1]) * self.robot_ang_velocities ** 2).sum(dim=-1)
+        self.reward_buf -= (torch.tensor([0.1, 0.2, 0.1], device=self.device) * self.robot_ang_velocities ** 2).sum(dim=-1)
         return self.reward_buf
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         super()._get_dones()
+        
+        # If suppress_done_signals flag is True, skip reset triggers (used during data collection)
+        if hasattr(self, 'suppress_done_signals') and self.suppress_done_signals:
+            return self.reset_terminated[:], self.reset_time_outs[:]
+        
         # end in target
         target_idx = ((self.positions[:, :2] - self.target_positions[:, :2]).norm(dim=-1) <= 0.25)
+        if self.reward_buf.device != target_idx.device:
+            self.reward_buf = self.reward_buf.to(target_idx.device)
         self.reward_buf[target_idx] += 100
 
         # end with rollover
@@ -155,11 +166,18 @@ class CrossingEnv(FtrEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self.actions[:] = actions
+
+    # def _pre_physics_step(self, actions: torch.Tensor):
+    #     self.actions[:] = actions
         # delta
         # flipper_delta = torch.where(actions >= 0.5, 1, torch.where(actions <= -0.5, -1, 0)) * self.flipper_dt
         # flipper_delta = torch.zeros_like(actions)
-        flipper_delta = actions * self.flipper_dt
-        self.flipper_target_pos = torch.clip(
-            torch.deg2rad(flipper_delta) + self.flipper_positions,
-            -np.deg2rad(60), np.deg2rad(60)
-        )
+
+        # flipper_delta = actions * self.flipper_dt
+        # self.flipper_target_pos = torch.clip(
+        #     torch.deg2rad(flipper_delta) + self.flipper_positions,
+        #     -np.deg2rad(60), np.deg2rad(60)
+        # )
+        # print("333333333333333333333333333333333333333333333333333333")
+        # print("Flipper target pos:", self.flipper_target_pos)
+        # print("Actions:", actions)
