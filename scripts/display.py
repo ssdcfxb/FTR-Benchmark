@@ -49,6 +49,7 @@ import omni.isaac.lab_tasks  # noqa: F401
 from omni.isaac.lab_tasks.utils import parse_env_cfg
 import ftr_envs.tasks  # Register tasks
 from ftr_envs.tasks.crossing.ftr_env import FtrEnv
+from omni.isaac.lab.utils.math import euler_xyz_from_quat
 
 def wait_for_user_input(app, prompt="Press Enter to continue..."):
     """
@@ -118,7 +119,7 @@ def main():
             print(f"[INFO] Robot spacing: {args_cli.robot_spacing} m (Grid: {grid_size}x{grid_size})")
 
             # Wait for user input (Non-blocking for viewer)
-            # wait_for_user_input(simulation_app, f"Waiting for user input to start round {round_idx + 1}...")
+            wait_for_user_input(simulation_app, f"Waiting for user input to start round {round_idx + 1}...")
 
             # Reset environment
             env.reset()
@@ -170,6 +171,16 @@ def main():
             # Write state back to sim
             robot.write_root_state_to_sim(root_state, env_ids=torch.arange(env.num_envs, device=unwrapped_env.device))
 
+            # --- Capture Initial States ---
+            # root_state indices: 0:3 pos, 3:7 quat (w, x, y, z), 7:10 lin_vel, 10:13 ang_vel
+            init_quats = root_state[:, 3:7].clone() # [N, 4]
+            # euler_xyz_from_quat returns a tuple (roll, pitch, yaw)
+            init_rpy_tuple = euler_xyz_from_quat(init_quats) 
+            init_rpy = torch.stack(init_rpy_tuple, dim=1) # [N, 3]
+            
+            init_quats_np = init_quats.cpu().numpy()
+            init_rpy_np = init_rpy.cpu().numpy()
+
             # --- Set Initial Flipper Positions (Direct Reset) ---
             # Create a tensor for all robots [N, 4]
             # Indices: 0=FrontLeft, 1=FrontRight, 2=RearLeft, 3=RearRight
@@ -184,6 +195,12 @@ def main():
 
             print(f"[INFO] Simulating for {args_cli.settle_steps} steps to let robots settle...")
             
+            # Wait for user input (Non-blocking for viewer)
+            # wait_for_user_input(simulation_app, f"Waiting for user input to start round {round_idx + 1}...")
+            # Wait for user input
+            # print(f"[INFO] Waiting for user input to start")
+            # input("Press Enter to continue...")
+    
             # Disable resets
             unwrapped_env.suppress_done_signals = True
             
@@ -219,11 +236,11 @@ def main():
                 
                 env.step(actions)
 
-                # if i == 2:
+                if i < 3:
 
-                #     # Wait for user input
-                #     print(f"[INFO] Waiting for user input to start round {round_idx + 1}...")
-                #     input("Press Enter to continue...")
+                    # Wait for user input
+                    print(f"[INFO] Waiting for user input to start round {round_idx + 1}...")
+                    input("Press Enter to continue...")
 
                 
                 if (i + 1) % 50 == 0:
@@ -286,10 +303,17 @@ def main():
                         "init_pos_x": float(spawn_positions[env_id, 0]),
                         "init_pos_y": float(spawn_positions[env_id, 1]),
                         "init_pos_z": float(spawn_positions[env_id, 2]),
+                        "init_quat_0": float(init_quats_np[env_id, 0]),
+                        "init_quat_1": float(init_quats_np[env_id, 1]),
+                        "init_quat_2": float(init_quats_np[env_id, 2]),
+                        "init_quat_3": float(init_quats_np[env_id, 3]),
+                        "init_roll": float(init_rpy_np[env_id, 0]),
+                        "init_pitch": float(init_rpy_np[env_id, 1]),
+                        "init_yaw": float(init_rpy_np[env_id, 2]),
+                        "init_flipper_angle_front": args_cli.flipper_front_angle,
+                        "init_flipper_angle_rear": args_cli.flipper_rear_angle,
                         "offset": offset_val,
                         "step": i,
-                        "flipper_angle_front": args_cli.flipper_front_angle,
-                        "flipper_angle_rear": args_cli.flipper_rear_angle,
                         "is_stable": int(is_stable[env_id]),
                         "is_abnormal": int(is_abnormal),
                         "lin_vel_norm": lin_vel_norm[env_id],
