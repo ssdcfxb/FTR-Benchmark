@@ -23,7 +23,7 @@ parser.add_argument("--num_rounds", type=int, default=10, help="Number of sampli
 parser.add_argument("--scan_range", type=float, default=2.0, help="Range (in meters) to scan/shift spawn positions across rounds.")
 parser.add_argument("--task", type=str, default="Ftr-Crossing-Direct-v0", help="Name of the task.")
 parser.add_argument("--terrain", type=str, default="cur_mixed", help="Name of the terrain to use (e.g., cur_mixed, cur_stairs_up).")
-parser.add_argument("--spawn_height", type=float, default=0.0, help="Height to spawn robots above the ground.")
+parser.add_argument("--spawn_height", type=float, default=0.2, help="Height to spawn robots above the ground.")
 parser.add_argument("--robot_spacing", type=float, default=2.0, help="Distance between robots in the grid (meters). Smaller values = tighter spacing.")
 parser.add_argument("--settle_steps", type=int, default=50, help="Number of steps to wait for robots to settle.")
 parser.add_argument("--sample_steps", type=int, default=20, help="Number of steps to record after settling.")
@@ -119,7 +119,7 @@ def main():
             print(f"[INFO] Robot spacing: {args_cli.robot_spacing} m (Grid: {grid_size}x{grid_size})")
 
             # Wait for user input (Non-blocking for viewer)
-            wait_for_user_input(simulation_app, f"Waiting for user input to start round {round_idx + 1}...")
+            # wait_for_user_input(simulation_app, f"Waiting for user input to start round {round_idx + 1}...")
 
             # Reset environment
             env.reset()
@@ -128,6 +128,15 @@ def main():
             # Get root state and apply grid arrangement
             root_state = robot.data.root_state_w.clone() # [N, 13]
             spawn_positions = np.zeros((env.num_envs, 3))
+
+            # --- Set Initial Flipper Positions (Direct Reset) ---
+            # Set flipper positions BEFORE setting root state to avoid physics artifacts
+            flipper_init_angles = torch.zeros((env.num_envs, 4), device=unwrapped_env.device)
+            flipper_init_angles[:, 0] = args_cli.flipper_front_angle
+            flipper_init_angles[:, 1] = args_cli.flipper_front_angle
+            flipper_init_angles[:, 2] = args_cli.flipper_rear_angle
+            flipper_init_angles[:, 3] = args_cli.flipper_rear_angle
+            robot.set_all_flipper_positions(flipper_init_angles, degree=True)
             
             for env_id in range(env.num_envs):
                 row = env_id // grid_size
@@ -160,6 +169,12 @@ def main():
                 root_state[env_id, 0] = world_x
                 root_state[env_id, 1] = world_y
                 root_state[env_id, 2] = ground_z + args_cli.spawn_height
+
+                # Set yaw to 180 degrees (Quaternion w,x,y,z = 0,0,0,1)
+                root_state[env_id, 3] = 1.0
+                root_state[env_id, 4] = 0.0
+                root_state[env_id, 5] = 0.0
+                root_state[env_id, 6] = 0.0
                 
                 spawn_positions[env_id, 0] = world_x
                 spawn_positions[env_id, 1] = world_y
@@ -180,18 +195,6 @@ def main():
             
             init_quats_np = init_quats.cpu().numpy()
             init_rpy_np = init_rpy.cpu().numpy()
-
-            # --- Set Initial Flipper Positions (Direct Reset) ---
-            # Create a tensor for all robots [N, 4]
-            # Indices: 0=FrontLeft, 1=FrontRight, 2=RearLeft, 3=RearRight
-            flipper_init_angles = torch.zeros((env.num_envs, 4), device=unwrapped_env.device)
-            flipper_init_angles[:, 0] = args_cli.flipper_front_angle
-            flipper_init_angles[:, 1] = args_cli.flipper_front_angle
-            flipper_init_angles[:, 2] = args_cli.flipper_rear_angle
-            flipper_init_angles[:, 3] = args_cli.flipper_rear_angle
-            
-            # Hard-reset the joint positions in the physics engine
-            robot.set_all_flipper_positions(flipper_init_angles, degree=True)
 
             print(f"[INFO] Simulating for {args_cli.settle_steps} steps to let robots settle...")
             
@@ -236,11 +239,11 @@ def main():
                 
                 env.step(actions)
 
-                if i < 3:
+                # if i < 3:
 
-                    # Wait for user input
-                    print(f"[INFO] Waiting for user input to start round {round_idx + 1}...")
-                    input("Press Enter to continue...")
+                #     # Wait for user input
+                #     print(f"[INFO] Waiting for user input to start round {round_idx + 1}...")
+                #     input("Press Enter to continue...")
 
                 
                 if (i + 1) % 50 == 0:
