@@ -24,15 +24,15 @@ parser.add_argument("--num_envs", type=int, default=64, help="Number of environm
 parser.add_argument("--task", type=str, default="Ftr-Crossing-Direct-v0", help="Name of the task.")
 parser.add_argument("--terrain", type=str, default="cur_mixed", help="Name of the terrain to use (e.g., cur_mixed, cur_stairs_up).")
 parser.add_argument("--spawn_height", type=float, default=0.8, help="Height to spawn robots above the ground.")
-parser.add_argument("--settle_steps", type=int, default=20, help="Number of steps to wait for robots to settle.")
-parser.add_argument("--sample_steps", type=int, default=10, help="Number of steps to record after settling.")
+parser.add_argument("--settle_steps", type=int, default=40, help="Number of steps to wait for robots to settle.")
+parser.add_argument("--sample_steps", type=int, default=20, help="Number of steps to record after settling.")
 parser.add_argument("--output_dir", type=str, default="logs/data_collection_grid", help="Directory to save collected data.")
 parser.add_argument("--grid_json", type=str, default="grid_cells_top_left.json", help="Path to the grid specifications JSON file.")
 parser.add_argument("--k_rounds", type=int, default=1, help="Number of rounds to sample for each parameter combination.")
 
 # Grid search parameters (Overridden by JSON for XY if used)
-parser.add_argument("--grid_res_x", type=float, default=2.0, help="Grid resolution for X in meters (if not using JSON).")
-parser.add_argument("--grid_res_y", type=float, default=2.0, help="Grid resolution for Y in meters (if not using JSON).")
+parser.add_argument("--grid_res_x", type=float, default=5.0, help="Grid resolution for X in meters (if not using JSON).")
+parser.add_argument("--grid_res_y", type=float, default=5.0, help="Grid resolution for Y in meters (if not using JSON).")
 parser.add_argument("--grid_res_yaw", type=float, default=45.0, help="Resolution for Yaw in degrees.")
 parser.add_argument("--grid_res_flipper", type=float, default=10.0, help="Resolution for flipper angle in degrees.")
 parser.add_argument("--flipper_range", type=float, default=70.0, help="Range for flipper angle (+/- degrees).")
@@ -59,7 +59,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import omni.isaac.lab_tasks  # noqa: F401
 from omni.isaac.lab_tasks.utils import parse_env_cfg
-from omni.isaac.lab.utils.math import quat_from_euler_xyz, euler_xyz_from_quat
+from omni.isaac.lab.utils.math import quat_from_euler_xyz
 import ftr_envs.tasks  # Register tasks
 from ftr_envs.tasks.crossing.ftr_env import FtrEnv
 
@@ -75,7 +75,29 @@ def load_grid_from_json(json_path):
         data = json.load(f)
         
     # Validating grid data
-    cells = data.get("cells", [])
+    if isinstance(data, list):
+        # Support for direct list of bounds (e.g. refined_grid_cells_bounds.json)
+        # Adapt to expected format with 'center' and 'origin'
+        cells = []
+        for idx, item in enumerate(data):
+            # refined_grid_cells_bounds.json structure: {x_min, x_max, y_min, y_max}
+            if 'x_min' in item and 'x_max' in item and 'y_min' in item and 'y_max' in item:
+                x_min, x_max = item['x_min'], item['x_max']
+                y_min, y_max = item['y_min'], item['y_max']
+                cells.append({
+                    "grid_index": [idx, 0], # Placeholder index
+                    "origin": [x_min, y_min],
+                    "center": [(x_min + x_max)/2.0, (y_min + y_max)/2.0],
+                    "size": [x_max - x_min, y_max - y_min],
+                    "bounds": item
+                })
+            else:
+                # Assuming it might already be in correct format
+                cells.append(item)
+    else:
+        # Standard format { "cells": [...] }
+        cells = data.get("cells", [])
+        
     print(f"[INFO] Loaded {len(cells)} grid cells from {json_path}.")
     return cells
 
@@ -127,13 +149,14 @@ def main():
 
         # 2. Define Parameter Ranges
         yaw_values = np.arange(0, 360, args_cli.grid_res_yaw)
-        flipper_values = np.arange(-args_cli.flipper_range, args_cli.flipper_range + args_cli.grid_res_flipper, args_cli.grid_res_flipper)
+        flipper_values = -np.arange(-args_cli.flipper_range, args_cli.flipper_range + args_cli.grid_res_flipper, args_cli.grid_res_flipper)
         
         # Total combinations estimate
         total_grids = len(grid_cells)
         total_yaws = len(yaw_values)
         total_flippers = len(flipper_values)
-        print(f"[INFO] Search Space: {total_grids} Locs * {total_yaws} Yaws * {total_flippers} Front * {total_flippers} Rear")
+        total_simulations = total_grids * total_yaws * total_flippers * total_flippers * args_cli.k_rounds
+        print(f"[INFO] Search Space: {total_grids} Locs * {total_yaws} Yaws * {total_flippers} Front * {total_flippers} Rear * {args_cli.k_rounds} Rounds = {total_simulations} Total Samples")
         
         # We process parameter combinations in batches.
         # Structure: Outer loops iterate grid cells, yaw, flippers.
@@ -146,9 +169,9 @@ def main():
         # 3. Loops - Inverted Order to maximize spatial diversity in each batch
         # New Order: Yaw -> Theta_Front -> Theta_Rear -> K_Round -> Grid
         # This ensures that consecutive tasks are in different grid cells.
-        for yaw_base in yaw_values:
-            for f_front_base in flipper_values:
-                for f_rear_base in flipper_values:
+        for f_front_base in flipper_values:
+            for f_rear_base in flipper_values:
+                for yaw_base in yaw_values:
                     for k in range(args_cli.k_rounds):
                         for cell in grid_cells:
                             
@@ -165,6 +188,8 @@ def main():
                                 "base_y": base_y,
                                 "origin_x": origin_x,
                                 "origin_y": origin_y,
+                                "size_x": cell.get("size", [None, None])[0],
+                                "size_y": cell.get("size", [None, None])[1],
                                 "base_yaw": yaw_base,
                                 "base_front": f_front_base,
                                 "base_rear": f_rear_base,
@@ -180,12 +205,15 @@ def main():
                                 first_write = False
                                 current_batch_configs = []
                                 batch_idx += 1
-                                print(f"[INFO] Processed Batch {batch_idx}")
+                                progress_pct = (global_sample_id / total_simulations) * 100
+                                print(f"[INFO] Processed Batch {batch_idx} | Progress: {global_sample_id}/{total_simulations} ({progress_pct:.2f}%)")
 
         # Process remaining
         if len(current_batch_configs) > 0:
             process_batch(env, unwrapped_env, robot, current_batch_configs, args_cli, csv_file, save_header=first_write)
-            print(f"[INFO] Processed Final Batch {batch_idx + 1}")
+            batch_idx += 1
+            progress_pct = (global_sample_id / total_simulations) * 100
+            print(f"[INFO] Processed Final Batch {batch_idx} | Progress: {global_sample_id}/{total_simulations} ({progress_pct:.2f}%)")
 
     except Exception as e:
         traceback.print_exc()
@@ -219,15 +247,19 @@ def process_batch(env, unwrapped_env, robot, configs, args, csv_file, save_heade
         # bias ranges: xy +/- rand_xy, yaw +/- rand_yaw, flipper +/- rand_flipper
         
         # Position
-        bias_x = np.random.uniform(-args.rand_xy, args.rand_xy)
-        bias_y = np.random.uniform(-args.rand_xy, args.rand_xy)
+        # Use specific cell size for range if available, otherwise use default rand_xy
+        range_x = cfg.get("size_x") / 2.0 if cfg.get("size_x") is not None else args.rand_xy
+        range_y = cfg.get("size_y") / 2.0 if cfg.get("size_y") is not None else args.rand_xy
+
+        bias_x = np.random.uniform(-range_x, range_x)
+        bias_y = np.random.uniform(-range_y, range_y)
         
         pos_x = cfg["base_x"] + bias_x
         pos_y = cfg["base_y"] + bias_y
         
         # Enforce Constraint: x, y >= origin
-        pos_x = max(pos_x, cfg["origin_x"])
-        pos_y = max(pos_y, cfg["origin_y"])
+        # pos_x = max(pos_x, cfg["origin_x"])
+        # pos_y = max(pos_y, cfg["origin_y"])
         
         # Get terrain height at this specific x,y
         # We use the terrain map in the env to verify height
@@ -315,8 +347,8 @@ def process_batch(env, unwrapped_env, robot, configs, args, csv_file, save_heade
     unwrapped_env.suppress_done_signals = True
 
     # Settle
-    lin_vel_threshold = 0.1
-    ang_vel_threshold = 0.1
+    lin_vel_threshold = 0.01
+    ang_vel_threshold = 0.01
     
     for _ in range(args.settle_steps):
         actions = torch.zeros((env.num_envs, unwrapped_env.action_space.shape[1]), device=unwrapped_env.device)
@@ -349,8 +381,6 @@ def process_batch(env, unwrapped_env, robot, configs, args, csv_file, save_heade
         # Capture Current State
         cur_pos = unwrapped_env.positions.cpu().numpy()
         cur_quat = unwrapped_env.orientations.cpu().numpy() # w, x, y, z
-        cur_rpy_tuple = euler_xyz_from_quat(unwrapped_env.orientations)
-        cur_rpy = torch.stack(cur_rpy_tuple, dim=1).cpu().numpy()
         cur_joints = unwrapped_env.flipper_positions.cpu().numpy()
         
         for i in range(num_robots):
@@ -379,9 +409,6 @@ def process_batch(env, unwrapped_env, robot, configs, args, csv_file, save_heade
                 "final_qx": float(cur_quat[i, 1]),
                 "final_qy": float(cur_quat[i, 2]),
                 "final_qz": float(cur_quat[i, 3]),
-                "final_roll": float(cur_rpy[i, 0]),
-                "final_pitch": float(cur_rpy[i, 1]),
-                "final_yaw": float(cur_rpy[i, 2]),
                 "final_flipper_0": float(cur_joints[i, 0]),
                 "final_flipper_1": float(cur_joints[i, 1]),
                 "final_flipper_2": float(cur_joints[i, 2]),

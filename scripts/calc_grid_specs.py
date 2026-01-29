@@ -36,7 +36,7 @@ def find_clusters(coords, gap_threshold=0.5):
     
     return clusters
 
-def calculate_grid_specs(csv_path, output_path, gap_threshold=0.5, z_min=0.4):
+def calculate_grid_specs(csv_path, output_path, gap_threshold=0.5, z_min=0.4, fixed_x=None, fixed_y=None):
     if not os.path.exists(csv_path):
         print(f"[ERROR] File {csv_path} not found.")
         return
@@ -60,6 +60,59 @@ def calculate_grid_specs(csv_path, output_path, gap_threshold=0.5, z_min=0.4):
     print(f"[INFO] Analyzing Y axis distribution...")
     y_clusters = find_clusters(ys, gap_threshold)
     print(f"[INFO] Found {len(y_clusters)} clusters along Y axis.")
+    
+    # Check if forced grid is requested
+    if fixed_x is not None or fixed_y is not None:
+        # Define ranges based on bounds
+        x_min_all, x_max_all = xs.min(), xs.max()
+        y_min_all, y_max_all = ys.min(), ys.max()
+
+        # FORCE X
+        if fixed_x and len(x_clusters) != fixed_x:
+            print(f"[INFO] Cluster count {len(x_clusters)} != {fixed_x}. Forcing split X.")
+            c_min, c_max = x_min_all, x_max_all
+            step = (c_max - c_min) / fixed_x
+            
+            new_x_clusters = []
+            for i in range(fixed_x):
+                s_min = c_min + i*step
+                s_max = c_min + (i+1)*step
+                
+                # Refine
+                in_slot = xs[(xs >= s_min) & (xs <= s_max + 1e-5)]
+                if len(in_slot) > 0:
+                    new_x_clusters.append((in_slot.min(), in_slot.max()))
+                else:
+                    new_x_clusters.append((s_min, s_max))
+            x_clusters = new_x_clusters
+
+        # FORCE Y
+        if fixed_y and len(y_clusters) != fixed_y:
+            print(f"[INFO] Cluster count {len(y_clusters)} != {fixed_y}. Forcing split Y.")
+            c_min, c_max = y_min_all, y_max_all
+            step = (c_max - c_min) / fixed_y
+            
+            new_y_clusters = []
+            for i in range(fixed_y):
+                s_min = c_min + i*step
+                s_max = c_min + (i+1)*step
+                
+                # Refine
+                in_slot = ys[(ys >= s_min) & (ys <= s_max + 1e-5)]
+                if len(in_slot) > 0:
+                    new_y_clusters.append((in_slot.min(), in_slot.max()))
+                else:
+                    new_y_clusters.append((s_min, s_max))
+            y_clusters = new_y_clusters
+    
+    # Validation/Redundancy check: if we already found the right number naturally, we keep them.
+    # The above blocks only engage if clusters <= 1 (approx). 
+    # Wait, if z_min=0.9 found 10 X clusters, we DON'T want to overwrite them with forced split unless necessary.
+    # But if User explicitly asked for --num_x 10, maybe we should Ensure it is 10.
+    # My logic above: `if len(x_clusters) <= 1 and fixed_x`. 
+    # If I find 10 clusters and fixed_x is 10, I skip the block -> Good.
+    # If I find 6 Y clusters and fixed_y is 15, I SKIP the block -> BAD.
+    # I should change logic to: `if len(x_clusters) != fixed_x:`
     
     # Calculate dimensions
     x_lengths = [c[1] - c[0] for c in x_clusters]
@@ -135,6 +188,8 @@ if __name__ == "__main__":
     parser.add_argument("--out", type=str, default="grid_cells_top_left.json", help="Path to output JSON")
     parser.add_argument("--gap", type=float, default=1.0, help="Gap threshold to detect grid separation")
     parser.add_argument("--z_min", type=float, default=0.4, help="Min Z threshold for valid terrain")
+    parser.add_argument("--num_x", type=int, default=None, help="Force number of cells in X")
+    parser.add_argument("--num_y", type=int, default=None, help="Force number of cells in Y")
     args = parser.parse_args()
     
-    calculate_grid_specs(args.csv, args.out, args.gap, args.z_min)
+    calculate_grid_specs(args.csv, args.out, args.gap, args.z_min, args.num_x, args.num_y)
